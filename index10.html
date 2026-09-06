@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PotholeWatch — Live Detection System</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+  import { getFirestore, collection, onSnapshot, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDOItu4ftIsOiYiM05AkZw84WGDXTy8idM",
+    authDomain: "pothole-severity.firebaseapp.com",
+    projectId: "pothole-severity",
+    storageBucket: "pothole-severity.firebasestorage.app",
+    messagingSenderId: "885236085237",
+    appId: "1:885236085237:web:b597a4d1cfce221bb2f0bc",
+    measurementId: "G-9L0NCTXHP1"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // ── Map setup ──────────────────────────────────────────────────────────
+  const map = L.map('map', { zoomControl: false }).setView([18.5204, 73.8567], 13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19
+  }).addTo(map);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  const markers = {};       // id -> {marker, severity}
+  let totalCount = 0, minorCount = 0, modCount = 0, sevCount = 0;
+  let currentFilter = 'all';
+  let followLatest = false;
+  const allDocs = {};       // id -> full doc data, for feed click lookup
+
+  function severityColor(s) {
+    if (s === 'severe') return '#FF3B3B';
+    if (s === 'moderate') return '#FF9500';
+    return '#30D158';
+  }
+
+  function severityIcon(severity) {
+    const color = severityColor(severity);
+    const size = severity === 'severe' ? 18 : severity === 'moderate' ? 14 : 10;
+    return L.divIcon({
+      className: '',
+      html: `<div style="width:${size}px;height:${size}px;background:${color};border-radius:50%;border:2px solid rgba(255,255,255,0.8);box-shadow:0 0 ${size}px ${color}88;animation:pulse 2s infinite"></div>`,
+      iconSize: [size, size],
+      iconAnchor: [size/2, size/2]
+    });
+  }
+
+  function formatTime(ts) {
+    if (!ts) return '—';
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  // ── Modal for image preview ───────────────────────────────────────────
+  window.openDetail = function(id) {
+    const d = allDocs[id];
+    if (!d) return;
+    const color = severityColor(d.severity);
+    document.getElementById('modal-sev').textContent = (d.severity || 'unknown').toUpperCase();
+    document.getElementById('modal-sev').style.color = color;
+    document.getElementById('modal-conf').textContent = d.confidence ? Math.round(d.confidence*100)+'%' : '—';
+    document.getElementById('modal-loc').textContent = (d.lat ? d.lat.toFixed(6) : '—') + '°N, ' + (d.lng ? d.lng.toFixed(6) : '—') + '°E';
+    document.getElementById('modal-time').textContent = formatTime(d.timestamp);
+    document.getElementById('modal-acc').textContent = d.accuracy && d.accuracy.trim() ? d.accuracy : '—';
+
+    const imgWrap = document.getElementById('modal-img-wrap');
+    const imgSrc = d.image_data || d.image_url;
+    if (imgSrc) {
+      imgWrap.innerHTML = `<img src="${imgSrc}" alt="Pothole capture" />`;
+    } else {
+      imgWrap.innerHTML = `<div class="no-img">📷<br>No image captured for this detection</div>`;
+    }
+    document.getElementById('modal-overlay').classList.add('active');
+  };
+
+  window.closeDetail = function() {
+    document.getElementById('modal-overlay').classList.remove('active');
+  };
+
+  function addFeedItem(doc) {
+    const id = doc.id;
+    const d  = doc.data();
+    allDocs[id] = d;
+
+    const feed = document.getElementById('feed');
+    if (document.getElementById('feed-' + id)) return;
+
+    const empty = feed.querySelector('.empty-feed');
+    if (empty) empty.remove();
+
+    const color = severityColor(d.severity);
+    const item = document.createElement('div');
+    item.id = 'feed-' + id;
+    item.className = 'feed-item';
+    item.dataset.severity = d.severity || 'minor';
+    item.innerHTML = `
+      <div class="feed-dot" style="background:${color};box-shadow:0 0 8px ${color}88"></div>
+      <div class="feed-content">
+        <div class="feed-header">
+          <span class="feed-severity" style="color:${color}">${(d.severity||'unknown').toUpperCase()}</span>
+          <span class="feed-conf">${d.confidence ? Math.round(d.confidence*100)+'%' : '—'}</span>
+        </div>
+        <div class="feed-loc">${d.lat ? d.lat.toFixed(5) : '—'}°N, ${d.lng ? d.lng.toFixed(5) : '—'}°E</div>
+        <div class="feed-time">${formatTime(d.timestamp)}</div>
+      </div>
+      ${(d.image_data || d.image_url) ? '<div class="feed-thumb-badge">📷</div>' : ''}
+    `;
+    item.onclick = () => {
+      openDetail(id);
+      if (d.lat && d.lng) map.setView([d.lat, d.lng], 17);
+    };
+    feed.insertBefore(item, feed.firstChild);
+    if (feed.children.length > 60) feed.removeChild(feed.lastChild);
+  }
+
+  function updateStats() {
+    document.getElementById('stat-total').textContent = totalCount;
+    document.getElementById('stat-severe').textContent = sevCount;
+    document.getElementById('stat-moderate').textContent = modCount;
+    document.getElementById('stat-minor').textContent = minorCount;
+    document.getElementById('leg-severe').textContent = sevCount;
+    document.getElementById('leg-moderate').textContent = modCount;
+    document.getElementById('leg-minor').textContent = minorCount;
+    const pct = totalCount > 0 ? Math.round(sevCount/totalCount*100) : 0;
+    document.getElementById('critical-pct').textContent = pct + '% critical';
+    drawChart();
+  }
+
+  function drawChart() {
+    const canvas = document.getElementById('chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const total = minorCount + modCount + sevCount;
+    if (total === 0) {
+      ctx.beginPath();
+      ctx.arc(W/2, H/2, H/2 - 4, 0, Math.PI*2);
+      ctx.strokeStyle = '#ffffff18';
+      ctx.lineWidth = 14;
+      ctx.stroke();
+      return;
+    }
+    const data = [
+      { val: sevCount, color: '#FF3B3B' },
+      { val: modCount, color: '#FF9500' },
+      { val: minorCount, color: '#30D158' }
+    ];
+    let start = -Math.PI / 2;
+    data.forEach(d => {
+      if (d.val === 0) return;
+      const slice = (d.val / total) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(W/2, H/2);
+      ctx.arc(W/2, H/2, H/2 - 4, start, start + slice);
+      ctx.closePath();
+      ctx.fillStyle = d.color;
+      ctx.fill();
+      start += slice;
+    });
+    ctx.beginPath();
+    ctx.arc(W/2, H/2, H/2 - 22, 0, Math.PI * 2);
+    ctx.fillStyle = '#0a0a0f';
+    ctx.fill();
+  }
+
+  function applyFilter() {
+    Object.entries(markers).forEach(([id, m]) => {
+      const visible = currentFilter === 'all' || m.severity === currentFilter;
+      if (visible) {
+        if (!map.hasLayer(m.marker)) m.marker.addTo(map);
+      } else {
+        if (map.hasLayer(m.marker)) map.removeLayer(m.marker);
+      }
+    });
+    document.querySelectorAll('#feed .feed-item').forEach(el => {
+      const visible = currentFilter === 'all' || el.dataset.severity === currentFilter;
+      el.style.display = visible ? 'flex' : 'none';
+    });
+  }
+
+  window.toggleFollow = function(btn) {
+    followLatest = !followLatest;
+    btn.classList.toggle('active', followLatest);
+  };
+
+  window.filterMap = function(severity, btn) {
+    currentFilter = severity;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    applyFilter();
+    fitView();
+  };
+
+  window.fitView = function() {
+    const visible = Object.values(markers).filter(
+      m => currentFilter === 'all' || m.severity === currentFilter
+    );
+    if (visible.length === 0) return;
+    const bounds = L.latLngBounds(visible.map(m => m.marker.getLatLng()));
+    map.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 });
+  };
+
+  // ── Real-time Firestore listener ─────────────────────────────────────
+  const q = query(collection(db, 'detections'), orderBy('timestamp', 'desc'), limit(300));
+  onSnapshot(q, (snapshot) => {
+    snapshot.docChanges().forEach(change => {
+      try {
+        if (change.type === 'added') {
+          const id = change.doc.id;
+          const d  = change.doc.data();
+          allDocs[id] = d;
+          totalCount++;
+          if (d.severity === 'severe') sevCount++;
+          else if (d.severity === 'moderate') modCount++;
+          else minorCount++;
+
+          if (d.lat && d.lng) {
+            const marker = L.marker([d.lat, d.lng], { icon: severityIcon(d.severity) }).addTo(map);
+            marker.on('click', () => openDetail(id));
+            markers[id] = { marker, severity: d.severity || 'minor' };
+            applyFilter();
+
+            const ring = L.circleMarker([d.lat, d.lng], {
+              radius: 16, color: severityColor(d.severity),
+              weight: 3, opacity: 0.95, fillOpacity: 0
+            }).addTo(map);
+            let r = 16;
+            const grow = setInterval(() => {
+              r += 4;
+              ring.setRadius(r);
+              ring.setStyle({ opacity: Math.max(0, 0.95 - (r - 16) / 40) });
+              if (r > 60) { clearInterval(grow); map.removeLayer(ring); }
+            }, 70);
+
+            if (followLatest) map.panTo([d.lat, d.lng]);
+          } else {
+            console.warn('⚠️ Detection has no lat/lng, no pin created:', id, d);
+          }
+          addFeedItem(change.doc);
+          updateStats();
+
+          const liveDot = document.getElementById('live-dot');
+          liveDot.style.background = '#30D158';
+          setTimeout(() => liveDot.style.background = '#30D15888', 500);
+        }
+      } catch (err) {
+        // A single malformed document must never stop future live updates.
+        console.error('⚠️ Error processing a detection — skipped, listener still active:', err, change.doc.id);
+      }
+    });
+  });
+</script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #111118;
+  --surface2: #1a1a24;
+  --border: #ffffff12;
+  --text: #e8e8f0;
+  --muted: #6b6b80;
+  --severe: #FF3B3B;
+  --moderate: #FF9500;
+  --minor: #30D158;
+  --accent: #0A84FF;
+  --font-mono: 'Space Mono', monospace;
+  --font-body: 'DM Sans', sans-serif;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  grid-template-columns: 280px 1fr 300px;
+  grid-template-areas:
+    "header header header"
+    "left map right";
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.3); }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+header {
+  grid-area: header;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+  z-index: 1000;
+}
+
+.logo {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.logo-icon {
+  width: 28px; height: 28px;
+  background: var(--severe);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+}
+.live-badge {
+  display: flex; align-items: center; gap: 6px;
+  background: #30D15818;
+  border: 1px solid #30D15840;
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--minor);
+}
+#live-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--minor);
+  transition: background 0.3s;
+  animation: blink 2s infinite;
+}
+.header-stats { display: flex; gap: 2px; margin-left: auto; }
+.hstat {
+  padding: 4px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  display: flex; align-items: center; gap: 6px;
+}
+.hstat-dot { width: 6px; height: 6px; border-radius: 50%; }
+.hstat-num { font-weight: 700; font-size: 13px; }
+.hstat-label { color: var(--muted); font-size: 9px; }
+
+.left-panel {
+  grid-area: left;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.panel-section { padding: 16px; border-bottom: 1px solid var(--border); }
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.stat-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.stat-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.stat-num { font-family: var(--font-mono); font-size: 36px; font-weight: 700; line-height: 1; margin-bottom: 2px; }
+.stat-sub { font-size: 10px; color: var(--muted); font-family: var(--font-mono); }
+
+.chart-wrap { display: flex; align-items: center; gap: 16px; padding: 12px 0 4px; }
+canvas#chart { width: 80px !important; height: 80px !important; flex-shrink: 0; }
+.legend { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.legend-label { color: var(--muted); flex: 1; }
+.legend-val { font-family: var(--font-mono); font-size: 10px; }
+
+.filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.filter-btn {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.filter-btn:hover { background: var(--surface2); color: var(--text); border-color: #ffffff30; }
+.filter-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+
+#map { grid-area: map; z-index: 1; }
+.leaflet-container { background: #060608; }
+
+.right-panel {
+  grid-area: right;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.feed-header-bar {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--muted);
+  text-transform: uppercase;
+  display: flex; align-items: center; justify-content: space-between;
+}
+#feed { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+#feed::-webkit-scrollbar { width: 3px; }
+#feed::-webkit-scrollbar-track { background: transparent; }
+#feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.feed-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  animation: slideIn 0.3s ease;
+  position: relative;
+}
+.feed-item:hover { background: #1e1e2c; border-color: #ffffff20; }
+.feed-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+.feed-content { flex: 1; min-width: 0; }
+.feed-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
+.feed-severity { font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
+.feed-conf { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+.feed-loc { font-size: 11px; color: var(--muted); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-time { font-family: var(--font-mono); font-size: 9px; color: #44445a; }
+.feed-thumb-badge {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 11px; opacity: 0.6;
+}
+
+.empty-feed {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; gap: 12px; color: var(--muted);
+  font-family: var(--font-mono); font-size: 11px; text-align: center; padding: 20px;
+}
+.empty-icon {
+  width: 48px; height: 48px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; opacity: 0.4;
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--surface2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  color: var(--text) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  box-shadow: 0 8px 32px #00000080 !important;
+}
+.leaflet-popup-tip { background: var(--surface2) !important; }
+.leaflet-control-zoom a { background: var(--surface2) !important; border-color: var(--border) !important; color: var(--text) !important; }
+
+/* ── Detail Modal ─────────────────────────────────────────────────── */
+#modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000c0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 5000;
+  animation: fadeIn 0.2s ease;
+}
+#modal-overlay.active { display: flex; }
+.modal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 420px;
+  max-width: 92vw;
+  overflow: hidden;
+  box-shadow: 0 24px 64px #000000a0;
+}
+.modal-img-wrap {
+  width: 100%;
+  height: 260px;
+  background: #060608;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.modal-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+.no-img {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  line-height: 1.8;
+}
+.modal-body { padding: 16px 18px; }
+.modal-sev-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+#modal-sev { font-family: var(--font-mono); font-size: 16px; font-weight: 700; letter-spacing: 0.05em; }
+.modal-close-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  width: 28px; height: 28px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-close-btn:hover { color: var(--text); }
+.modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.modal-field { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.modal-field-label { font-family: var(--font-mono); font-size: 8px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 4px; }
+.modal-field-val { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+.modal-field.full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><div class="logo-icon">⚠</div>POTHOLEWATCH</div>
+  <div class="live-badge"><div id="live-dot"></div>LIVE</div>
+  <button class="filter-btn" onclick="toggleFollow(this)" style="font-size:9px">📍 FOLLOW LATEST</button>
+  <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted)" id="clock"></div>
+
+  <div class="header-stats">
+    <div class="hstat">
+      <div class="hstat-dot" style="background:var(--severe)"></div>
+      <div><div class="hstat-num" id="stat-severe" style="color:var(--severe)">0</div><div class="hstat-label">SEVERE</div></div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-dot" style="background:var(--moderate)"></div>
+      <div><div class="hstat-num" id="stat-moderate" style="color:var(--moderate)">0</div><div class="hstat-label">MODERATE</div></div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-dot" style="background:var(--minor)"></div>
+      <div><div class="hstat-num" id="stat-minor" style="color:var(--minor)">0</div><div class="hstat-label">MINOR</div></div>
+    </div>
+  </div>
+</header>
+
+<aside class="left-panel">
+  <div class="panel-section">
+    <div class="section-label">Overview</div>
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-num" id="stat-total">0</div>
+        <div class="stat-sub">TOTAL DETECTED</div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chart" width="80" height="80"></canvas>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:var(--severe)"></div><span class="legend-label">Severe</span><span class="legend-val" id="leg-severe">0</span></div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--moderate)"></div><span class="legend-label">Moderate</span><span class="legend-val" id="leg-moderate">0</span></div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--minor)"></div><span class="legend-label">Minor</span><span class="legend-val" id="leg-minor">0</span></div>
+      </div>
+    </div>
+    <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:4px" id="critical-pct">0% critical</div>
+  </div>
+
+  <div class="panel-section">
+    <div class="section-label">Filter Map</div>
+    <div class="filters">
+      <button class="filter-btn active" onclick="filterMap('all', this)">ALL</button>
+      <button class="filter-btn" onclick="filterMap('severe', this)" style="color:var(--severe)">SEVERE</button>
+      <button class="filter-btn" onclick="filterMap('moderate', this)" style="color:var(--moderate)">MODERATE</button>
+      <button class="filter-btn" onclick="filterMap('minor', this)" style="color:var(--minor)">MINOR</button>
+    </div>
+  </div>
+
+  <div class="panel-section" style="border-bottom:none;flex:1">
+    <div class="section-label">System</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:var(--muted);font-family:var(--font-mono)">MODEL</span><span style="font-family:var(--font-mono);font-size:10px">YOLOv8s</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:var(--muted);font-family:var(--font-mono)">CLASSES</span><span style="font-family:var(--font-mono);font-size:10px">3 severity</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:var(--muted);font-family:var(--font-mono)">DB</span><span style="font-family:var(--font-mono);font-size:10px;color:var(--minor)">Firebase ●</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:var(--muted);font-family:var(--font-mono)">REGION</span><span style="font-family:var(--font-mono);font-size:10px">Pune, IN</span></div>
+    </div>
+  </div>
+</aside>
+
+<div id="map"></div>
+
+<aside class="right-panel">
+  <div class="feed-header-bar"><span>Detection Feed</span><span id="feed-count" style="color:var(--accent)">LIVE</span></div>
+  <div id="feed">
+    <div class="empty-feed">
+      <div class="empty-icon">📡</div>
+      <div>Waiting for detections...</div>
+      <div style="font-size:9px;opacity:0.6">Start detect_live_demo.py to see data</div>
+    </div>
+  </div>
+</aside>
+
+<!-- Detail Modal -->
+<div id="modal-overlay" onclick="if(event.target===this) closeDetail()">
+  <div class="modal-card">
+    <div class="modal-img-wrap" id="modal-img-wrap">
+      <div class="no-img">📷<br>No image</div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-sev-row">
+        <span id="modal-sev">—</span>
+        <button class="modal-close-btn" onclick="closeDetail()">✕</button>
+      </div>
+      <div class="modal-grid">
+        <div class="modal-field"><div class="modal-field-label">Confidence</div><div class="modal-field-val" id="modal-conf">—</div></div>
+        <div class="modal-field"><div class="modal-field-label">Accuracy</div><div class="modal-field-val" id="modal-acc">—</div></div>
+        <div class="modal-field full"><div class="modal-field-label">Location</div><div class="modal-field-val" id="modal-loc">—</div></div>
+        <div class="modal-field full"><div class="modal-field-label">Detected At</div><div class="modal-field-val" id="modal-time">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleDateString('en-IN') + ' ' + now.toLocaleTimeString('en-IN', { hour12: false });
+}
+setInterval(updateClock, 1000);
+updateClock();
+</script>
+</body>
+</html>
