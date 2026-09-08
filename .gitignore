@@ -11,12 +11,28 @@ env/
 
 # Environment variables
 .env
+serviceAccountKey.json
 
-# Model files
+# Datasets
+data/raw/
+data/auto_dataset/
+
+# Training run outputs (graphs, checkpoints, batch previews)
+runs/
+
+# Pretrained base models (auto-download, no need to track)
+yolov8n.pt
+yolo26n.pt
+weights/
+
+# Model files (general rule - but see exception below)
 *.pt
 *.pth
 *.onnx
 *.safetensors
+
+# IMPORTANT: keep our actual trained model, override the *.pt rule above
+!models/traffic_density_model.pt
 
 # Large video / image data
 *.mp4
@@ -50,10 +66,6 @@ Thumbs.db
 
 models/anpr/awiros/PaddleOCR/
 
-
 # Test images
 sample.png
 sample_detected*.png
-
-
-
