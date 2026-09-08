@@ -1,19 +1,7 @@
-# Core Awiros / PaddleOCR dependencies
-# For GPU (RTX 4060): use paddlepaddle-gpu matching your CUDA version.
-# Check your CUDA version with `nvidia-smi`, then install the matching wheel from:
-# https://www.paddlepaddle.org.cn/en/install/quick
-# Example for CUDA 11.8:
-#   pip install paddlepaddle-gpu==2.6.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
-# Example for CUDA 12.x, check the same page for the right index URL.
-#
-# If you just want to get something running today, fall back to CPU:
-#   pip install paddlepaddle==2.6.1
-# and pass --device cpu in test.py / the comparison script.
-
-paddleocr>=2.7.0
-huggingface_hub>=0.23.0
-easyocr>=1.7.1
-opencv-python>=4.9.0
-numpy>=1.24.0
-safetensors>=0.4.0
-pillow>=10.0.0
+ultralytics
+opencv-python
+numpy
+paddlepaddle
+Pillow
+safetensors
+PyYAML
