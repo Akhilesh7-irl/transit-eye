@@ -5,3 +5,7 @@ paddlepaddle
 Pillow
 safetensors
 PyYAML
+torch
+torchvision
+roboflow
+firebase-admin
