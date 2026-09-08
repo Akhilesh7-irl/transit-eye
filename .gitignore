@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+.awiros-env/
+
+# Environment variables
+.env
+
+# Model files
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Large video / image data
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# Generated outputs
+*_output.mp4
+*_output.avi
+*_result.jpg
+*_result.png
+plate_crop_test.jpg
+sample_anpr.jpg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+models/anpr/awiros/PaddleOCR/
+
+
+# Test images
+sample.png
+sample_detected*.png
+
+
+
