@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+
+# Datasets
+data/raw/
+data/auto_dataset/
+
+# All auto-generated training run outputs (graphs, checkpoints, batch previews)
+runs/
+
+# Pretrained base models (auto-download, no need to track)
+yolov8n.pt
+yolo26n.pt
+weights/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+serviceAccountKey.json
+
+# Demo videos (large media files, not source)
+*.mp4
